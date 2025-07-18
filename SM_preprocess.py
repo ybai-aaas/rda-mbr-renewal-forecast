@@ -4,11 +4,12 @@ import pandas as pd
 import numpy as np
 import argparse
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import TargetEncoder, OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder
+from category_encoders import TargetEncoder
 
 # To do:
-# Add encoding for categorical variables
-# split data by time, not random sampling
+# Add encoding for categorical variables - DONE
+# split data by time, not random sampling - TODO
 
 def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random_state=42):
     # Preprocess data and split into train/validation/test sets
@@ -69,24 +70,11 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
     for col in categorical_columns:
         df_processed[col] = df_processed[col].astype(str)
 
-    # Split data into train/temp, then temp into validation/test
-    X = df_processed[feature_columns]
-    y = df_processed['Renewed']
+    # Split data BEFORE encoding to prevent data leakage
+    X = df_processed[feature_columns].copy()
+    y = df_processed['Renewed'].copy()
 
-    # Encode categorical columns ###########################################################################
-    # NEW 0718: Encode categorical columns
-    # if unique elements > 10, use LE: 
-    # if unique elements < 10, use OHE: pd.get_dummies()
-    # OR: if column is KeyCode__c, use Target Encoding; else use get dummies
-    TE = TargetEncoder()
-    for col in X:
-        if df_processed[col].unique() > 20:
-            # Use Target Encoding
-            df_processed[col] = TE(smooth='auto').fit(df_processed[col], y)
-        else:
-            df_processed[col] = pd.get_dummies(df_processed[col])
-    
-    # First split: Training and validation
+    # First split: Training and temp (validation + test)
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=(test_size + val_size), random_state=random_state, stratify=y
     )
@@ -100,6 +88,81 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
     print(f"Train: {X_train.shape[0]} samples")
     print(f"Validation: {X_val.shape[0]} samples")
     print(f"Test: {X_test.shape[0]} samples")
+
+    # Encode categorical columns AFTER splitting to prevent data leakage
+    print("Encoding categorical variables...")
+    
+    # Store encoders for potential future use
+    encoders = {}
+    
+    # Process each categorical column
+    for col in categorical_columns:
+        n_unique = X_train[col].nunique()
+        print(f"Processing {col}: {n_unique} unique values")
+        
+        if n_unique > 20:  # Use Target Encoding for high cardinality
+            print(f"Using Target Encoding for {col}")
+            
+            # Initialize target encoder with smoothing
+            te = TargetEncoder(smoothing=10.0, min_samples_leaf=1)
+            
+            # Fit on training data only and transform
+            X_train[col] = te.fit_transform(X_train[col], y_train)
+            
+            # Transform validation and test sets
+            X_val[col] = te.transform(X_val[col])
+            X_test[col] = te.transform(X_test[col])
+            
+            encoders[col] = {'type': 'target', 'encoder': te}
+            
+        else:  # Use One-Hot Encoding for columns with lower cardinality
+            print(f"Using One-Hot Encoding for {col}")
+            
+            # Get dummy variables for training set
+            train_dummies = pd.get_dummies(X_train[col], prefix=col, dummy_na=False)
+            
+            # Store column names for consistency
+            dummy_cols = train_dummies.columns.tolist()
+            encoders[col] = {'type': 'onehot', 'columns': dummy_cols}
+            
+            # Replace original column with dummy variables in training set
+            X_train = X_train.drop(columns=[col])
+            X_train = pd.concat([X_train, train_dummies], axis=1)
+            
+            # Process validation set
+            val_dummies = pd.get_dummies(X_val[col], prefix=col, dummy_na=False)
+            X_val = X_val.drop(columns=[col])
+            
+            # Ensure validation set has same dummy columns as training
+            for dummy_col in dummy_cols:
+                if dummy_col not in val_dummies.columns:
+                    val_dummies[dummy_col] = 0
+            val_dummies = val_dummies[dummy_cols]  # Reorder columns
+            X_val = pd.concat([X_val, val_dummies], axis=1)
+            
+            # Process test set
+            test_dummies = pd.get_dummies(X_test[col], prefix=col, dummy_na=False)
+            X_test = X_test.drop(columns=[col])
+            
+            # Ensure test set has same dummy columns as training
+            for dummy_col in dummy_cols:
+                if dummy_col not in test_dummies.columns:
+                    test_dummies[dummy_col] = 0
+            test_dummies = test_dummies[dummy_cols]  # Reorder columns
+            X_test = pd.concat([X_test, test_dummies], axis=1)
+
+    # Reset indices to avoid issues when concatenating
+    X_train.reset_index(drop=True, inplace=True)
+    X_val.reset_index(drop=True, inplace=True)
+    X_test.reset_index(drop=True, inplace=True)
+    y_train.reset_index(drop=True, inplace=True)
+    y_val.reset_index(drop=True, inplace=True)
+    y_test.reset_index(drop=True, inplace=True)
+
+    print(f"Final feature shapes after encoding:")
+    print(f"Train: {X_train.shape}")
+    print(f"Validation: {X_val.shape}")
+    print(f"Test: {X_test.shape}")
 
     # Create output directories
     train_dir = os.path.join(output_path, 'train')
@@ -124,14 +187,19 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
 
     # Create metadata for the pipeline
     metadata = {
-        "feature_names": feature_columns,
-        "categorical_columns": categorical_columns,
-        "numerical_columns": numerical_columns,
+        "feature_names": X_train.columns.tolist(),  # Updated feature names after encoding
+        "original_categorical_columns": categorical_columns,
+        "original_numerical_columns": numerical_columns,
         "target_column": "Renewed",
         "original_shape": df.shape,
         "train_shape": train_df.shape,
         "validation_shape": val_df.shape,
         "test_shape": test_df.shape,
+        "encoding_info": {
+            "target_encoded_columns": [k for k, v in encoders.items() if v['type'] == 'target'],
+            "onehot_columns": {k: v['columns'] for k, v in encoders.items() if v['type'] == 'onehot'},
+            "encoding_threshold": 20
+        },
         "preprocessing_info": {
             "missing_value_strategy": {
                 "categorical": "Unknown",
@@ -192,8 +260,8 @@ if __name__ == "__main__":
         
         print("Preprocessing completed successfully!")
         print(f"Features: {len(metadata['feature_names'])}")
-        print(f"Categorical features: {len(metadata['categorical_columns'])}")
-        print(f"Numerical features: {len(metadata['numerical_columns'])}")
+        print(f"Original categorical features: {len(metadata['original_categorical_columns'])}")
+        print(f"Original numerical features: {len(metadata['original_numerical_columns'])}")
         
     except Exception as e:
         print(f"Error during preprocessing: {str(e)}")
