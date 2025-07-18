@@ -5,7 +5,41 @@ import numpy as np
 import argparse
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
-from category_encoders import TargetEncoder
+
+class SimpleTargetEncoder:
+    """Simple Target Encoder with smoothing to prevent overfitting"""
+    
+    def __init__(self, smoothing=10.0):
+        self.smoothing = smoothing
+        self.global_mean = None
+        self.category_means = {}
+        
+    def fit(self, X, y):
+        """Fit the encoder on training data"""
+        self.global_mean = y.mean()
+        self.category_means = {}
+        
+        # Calculate smoothed means for each category
+        for category in X.unique():
+            category_mask = X == category
+            category_target = y[category_mask]
+            n_samples = len(category_target)
+            category_mean = category_target.mean()
+            
+            # Apply smoothing: (category_mean * n + global_mean * smoothing) / (n + smoothing)
+            smoothed_mean = (category_mean * n_samples + self.global_mean * self.smoothing) / (n_samples + self.smoothing)
+            self.category_means[category] = smoothed_mean
+            
+        return self
+        
+    def transform(self, X):
+        """Transform new data using fitted encoder"""
+        # Map categories to their encoded values, use global mean for unseen categories
+        return X.map(self.category_means).fillna(self.global_mean)
+        
+    def fit_transform(self, X, y):
+        """Fit and transform in one step"""
+        return self.fit(X, y).transform(X)
 
 # To do:
 # Add encoding for categorical variables - DONE
@@ -70,7 +104,7 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
     for col in categorical_columns:
         df_processed[col] = df_processed[col].astype(str)
 
-    # Split data BEFORE encoding to prevent data leakage
+    # Split data before encoding to prevent data leakage
     X = df_processed[feature_columns].copy()
     y = df_processed['Renewed'].copy()
 
@@ -89,7 +123,7 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
     print(f"Validation: {X_val.shape[0]} samples")
     print(f"Test: {X_test.shape[0]} samples")
 
-    # Encode categorical columns AFTER splitting to prevent data leakage
+    # Encode categorical columns after splitting to prevent data leakage
     print("Encoding categorical variables...")
     
     # Store encoders for potential future use
@@ -104,7 +138,7 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
             print(f"Using Target Encoding for {col}")
             
             # Initialize target encoder with smoothing
-            te = TargetEncoder(smoothing=10.0, min_samples_leaf=1)
+            te = SimpleTargetEncoder(smoothing=10.0)
             
             # Fit on training data only and transform
             X_train[col] = te.fit_transform(X_train[col], y_train)
@@ -113,9 +147,9 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
             X_val[col] = te.transform(X_val[col])
             X_test[col] = te.transform(X_test[col])
             
-            encoders[col] = {'type': 'target', 'encoder': te}
+            encoders[col] = {'type': 'target', 'encoder_type': 'SimpleTargetEncoder'}
             
-        else:  # Use One-Hot Encoding for columns with lower cardinality
+        else:  # Use One-Hot Encoding for low cardinality
             print(f"Using One-Hot Encoding for {col}")
             
             # Get dummy variables for training set
@@ -198,7 +232,7 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
         "encoding_info": {
             "target_encoded_columns": [k for k, v in encoders.items() if v['type'] == 'target'],
             "onehot_columns": {k: v['columns'] for k, v in encoders.items() if v['type'] == 'onehot'},
-            "encoding_threshold": 20
+            "encoding_threshold": 20  # Columns with >10 unique values get target encoded
         },
         "preprocessing_info": {
             "missing_value_strategy": {
