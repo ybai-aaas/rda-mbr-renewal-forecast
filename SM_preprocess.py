@@ -73,7 +73,20 @@ def preprocess_data(input_path, output_path, test_size=0.2, val_size=0.2, random
     X = df_processed[feature_columns]
     y = df_processed['Renewed']
 
-    # First split: train vs (validation + test)
+    # Encode categorical columns ###########################################################################
+    # NEW 0718: Encode categorical columns
+    # if unique elements > 10, use LE: 
+    # if unique elements < 10, use OHE: pd.get_dummies()
+    # OR: if column is KeyCode__c, use Target Encoding; else use get dummies
+    TE = TargetEncoder()
+    for col in X:
+        if df_processed[col].unique() > 20:
+            # Use Target Encoding
+            df_processed[col] = TE(smooth='auto').fit(df_processed[col], y)
+        else:
+            df_processed[col] = pd.get_dummies(df_processed[col])
+    
+    # First split: Training and validation
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=(test_size + val_size), random_state=random_state, stratify=y
     )
